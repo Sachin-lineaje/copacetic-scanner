@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	v1alpha1 "github.com/project-copacetic/copacetic/pkg/types/v1alpha1"
+	"github.com/package-url/packageurl-go"
 )
 
 type FakeParser struct{}
@@ -30,6 +31,18 @@ func newFakeParser() *FakeParser {
 	return &FakeParser{}
 }
 
+func extractDistro(qualifiers packageurl.Qualifiers) string {
+	distro, ok := qualifiers.Map()["distro"]
+	if !ok || distro == "" {
+		return ""
+	}
+	parts := strings.SplitN(distro, "-", 2)
+	if len(parts) == 2 {
+		return parts[1]
+	}
+	return distro
+}
+
 func (k *FakeParser) parse(file string) (*v1alpha1.UpdateManifest, error) {
 	// Parse the fake report
 	report, err := parseFakeReport(file)
@@ -51,51 +64,45 @@ func (k *FakeParser) parse(file string) (*v1alpha1.UpdateManifest, error) {
 		},
 	}
 
+	osPurlTypes := map[string]struct{}{
+		"alpm":   {},
+		"apk":    {},
+		"deb":    {},
+		"rpm":    {},
+		"nix":    {},
+		"oci":    {},
+		"docker": {},
+		"qpkg":   {},
+	}
+
 	// Convert the fake report to the standardized report
+	var setOSDetails = false
 	for i := range report.Metadata.Basic_plan_component_vulnerability_fixes {
 		pkgs := &report.Metadata.Basic_plan_component_vulnerability_fixes[i]
-		if pkgs.Target_component_purl != "" {
-			var splitCurrentComponentPurl []string
-			var currentPackageWithoutArch string
-			var currentPackageWithVersion []string
-			var installedVersion string
-
-			var splitTargetComponentPurl []string
-			var packageNameWithVersion string
-			var splitPackageNameWithVersion []string
-			var targetPackageName string
-			var fixedVersion string
-
-			if strings.Contains(pkgs.Current_component_purl, "github") {
-				splitCurrentComponentPurl = strings.Split(pkgs.Current_component_purl, "/")
-				currentPackageWithoutArch = strings.Split(splitCurrentComponentPurl[3], "?")[0]
-				currentPackageWithVersion = strings.Split(currentPackageWithoutArch, "@")
-				installedVersion = currentPackageWithVersion[1]
-
-				splitTargetComponentPurl = strings.Split(pkgs.Target_component_purl, "/")
-				packageNameWithVersion = splitTargetComponentPurl[3]
-				splitPackageNameWithVersion = strings.Split(packageNameWithVersion, "@")
-				targetPackageName = splitPackageNameWithVersion[0]
-				fixedVersion = splitPackageNameWithVersion[1]
-			} else {
-				splitCurrentComponentPurl = strings.Split(pkgs.Current_component_purl, "/")
-				currentPackageWithoutArch = strings.Split(splitCurrentComponentPurl[2], "?")[0]
-				currentPackageWithVersion = strings.Split(currentPackageWithoutArch, "@")
-				installedVersion = currentPackageWithVersion[1]
-
-				splitTargetComponentPurl = strings.Split(pkgs.Target_component_purl, "/")
-				packageNameWithVersion = splitTargetComponentPurl[2]
-				splitPackageNameWithVersion = strings.Split(packageNameWithVersion, "@")
-				targetPackageName = splitPackageNameWithVersion[0]
-				fixedVersion = splitPackageNameWithVersion[1]
+		if pkgs.Current_component_purl != "" && pkgs.Target_component_purl != "" {
+			installedInstance, err := packageurl.FromString(pkgs.Current_component_purl)
+			if err != nil {
+				return nil, err
 			}
-			
-			updates.Updates = append(updates.Updates, v1alpha1.UpdatePackage{
-				Name: targetPackageName,
-				InstalledVersion: installedVersion,
-				FixedVersion: fixedVersion,
-				VulnerabilityID: pkgs.Vulnerability_id,
-			})
+			_, exists := osPurlTypes[strings.ToLower(installedInstance.Type)]
+			if exists {
+				if !setOSDetails {
+					setOSDetails = true
+					updates.Metadata.OS.Type = installedInstance.Namespace
+					updates.Metadata.OS.Version = extractDistro(installedInstance.Qualifiers)
+					updates.Metadata.Config.Arch = installedInstance.Qualifiers.Map()["arch"]
+				}
+				targetInstance, err := packageurl.FromString(pkgs.Target_component_purl)
+				if err != nil {
+					return nil, err
+				}
+				updates.Updates = append(updates.Updates, v1alpha1.UpdatePackage{
+					Name: targetInstance.Name,
+					InstalledVersion: installedInstance.Version,
+					FixedVersion: targetInstance.Version,
+					VulnerabilityID: pkgs.Vulnerability_id,
+				})
+			}
 		}
 	}
 	return &updates, nil
